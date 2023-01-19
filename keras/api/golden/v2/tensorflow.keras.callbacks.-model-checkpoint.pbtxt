@@ -5,7 +5,7 @@ tf_class {
   is_instance: "<type \'object\'>"
   member_method {
     name: "__init__"
-    argspec: "args=[\'self\', \'filepath\', \'monitor\', \'verbose\', \'save_best_only\', \'save_weights_only\', \'mode\', \'save_freq\', \'options\', \'initial_value_threshold\'], varargs=None, keywords=kwargs, defaults=[\'val_loss\', \'0\', \'False\', \'False\', \'auto\', \'epoch\', \'None\', \'None\'], "
+    argspec: "args=[\'self\', \'filepath\', \'monitor\', \'verbose\', \'save_best_only\', \'save_weights_only\', \'mode\', \'save_freq\', \'options\', \'initial_value_threshold\', \'best_model_filepath\'], varargs=None, keywords=kwargs, defaults=[\'val_loss\', \'0\', \'False\', \'False\', \'auto\', \'epoch\', \'None\', \'None\', \'None\'], "
   }
   member_method {
     name: "on_batch_begin"
@@ -53,7 +53,7 @@ tf_class {
   }
   member_method {
     name: "on_test_end"
-    argspec: "args=[\'self\', \'logs\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'self\', \'logs\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "on_train_batch_begin"

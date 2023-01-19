@@ -1269,6 +1269,69 @@ class ModelCheckpoint(Callback):
     model.load_weights(checkpoint_filepath)
     ```
 
+    If this callback is used as a standalone best model exporter at the end of
+    training within an epoch in `model.fit()`. Users can set the `save_best_only`
+    parameter to `True`,  `save_freq="eval"` and provide the
+    "best_model_filepath". The callback will then export the model that the
+    evaluator deems as the best to the specified file path.
+
+    Example:
+    ```
+    model.compile(loss=..., optimizer=...,
+                  metrics=['accuracy'])
+    EPOCHS = 10
+
+    checkpoint_filepath = '/tmp/checkpoint'
+    model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath=checkpoint_filepath,
+        save_weights_only=True,
+        monitor='val_accuracy',
+        mode='max',
+        save_best_only=True,
+        save_freq=`eval`
+        best_model_filepath='/tmp/best_model_export_dir`)
+
+    # Model weights are saved at the end of every epoch, if it's the best seen
+    # so far.
+    model.fit(
+            validation_data=(x_test, y_test),
+            epochs=EPOCHS,
+            callbacks=[model_checkpoint_callback])
+    ```
+
+    When using the ModelCheckpoint callback in conjunction with
+    `keras.utils.SidecarEvaluator`, users can set the `save_best_only` parameter
+    to `True`, `save_freq="eval"` and provide the "best_model_filepath". The
+    callback will then export the model that the evaluator deems as the best
+    (among the checkpoints saved by the training counterpart) to the specified
+    file path.
+
+    Example:
+
+    ```python
+    model.compile(loss=..., optimizer=...,
+                  metrics=['accuracy'])
+    sidecar_evaluator = keras.utils.SidecarEvaluator(
+        model=model,
+        data=dataset,
+        checkpoint_dir=checkpoint_dir,
+        max_evaluations=1,
+        callbacks=[
+            ModelCheckpoint(
+                best_model_filepath='/tmp/best_model_export_dir`,
+                filepath=checkpoint_filepath,
+                save_freq="eval",
+                save_weights_only=True,
+                monitor="loss",
+                mode="min",
+                verbose=1,
+            ),
+        ],
+    )
+    sidecar_evaluator.start()
+    # Model weights are saved if evaluator deems it's the best seen so far.
+    ```
+
     Args:
         filepath: string or `PathLike`, path to save the model file. e.g.
           filepath = os.path.join(working_dir, 'ckpt', file_name). `filepath`
@@ -1309,13 +1372,17 @@ class ModelCheckpoint(Callback):
         save_weights_only: if True, then only the model's weights will be saved
           (`model.save_weights(filepath)`), else the full model is saved
           (`model.save(filepath)`).
-        save_freq: `'epoch'` or integer. When using `'epoch'`, the callback
-          saves the model after each epoch. When using integer, the callback
-          saves the model at end of this many batches. If the `Model` is
+        save_freq: Determines how often the model is saved during training. It
+          can take one of three values: 'eval', 'epoch', or an integer. When set
+          to 'eval' during traning, the model is saved at the end of every epoch
+          but exports the model that the evaluator deems the "best" to
+          `best_model_filepath`. When set to 'epoch', the callback saves the
+          model after each epoch. When an integer is provided, the callback
+          saves the model at the end of that many batches.  If the `Model` is
           compiled with `steps_per_execution=N`, then the saving criteria will
           be checked every Nth batch. Note that if the saving isn't aligned to
-          epochs, the monitored metric may potentially be less reliable (it
-          could reflect as little as 1 batch, since the metrics get reset every
+          epochs, the monitored metric may potentially be less eliable (it could
+          reflect as little as 1 batch, since the metrics get reset every
           epoch). Defaults to `'epoch'`.
         options: Optional `tf.train.CheckpointOptions` object if
           `save_weights_only` is true or optional `tf.saved_model.SaveOptions`
@@ -1324,6 +1391,11 @@ class ModelCheckpoint(Callback):
           metric to be monitored. Only applies if `save_best_value=True`. Only
           overwrites the model weights already saved if the performance of
           current model is better than this value.
+        best_model_filepath: The filepath where callback saves the best models
+          during evaluation. The filepath can include epoch formatting options,
+          such as 'best-model-{epoch:04d}', to include the training epoch in the
+          file name. The training epoch at which the checkpoint was saved will
+          be used to fill in the epoch placeholder in the path.
         **kwargs: Additional arguments for backwards compatibility. Possible key
           is `period`.
     """
@@ -1339,6 +1411,7 @@ class ModelCheckpoint(Callback):
         save_freq="epoch",
         options=None,
         initial_value_threshold=None,
+        best_model_filepath=None,
         **kwargs,
     ):
         super().__init__()
@@ -1353,6 +1426,7 @@ class ModelCheckpoint(Callback):
         self._batches_seen_since_last_saving = 0
         self._last_batch_seen = 0
         self.best = initial_value_threshold
+        self._best_model_filepath = best_model_filepath
 
         if save_weights_only:
             if options is None or isinstance(
@@ -1426,12 +1500,19 @@ class ModelCheckpoint(Callback):
                 if self.best is None:
                     self.best = np.Inf
 
-        if self.save_freq != "epoch" and not isinstance(self.save_freq, int):
+        if self.save_freq not in ["epoch", "eval"] and not isinstance(
+            self.save_freq, int
+        ):
             raise ValueError(
                 f"Unrecognized save_freq: {self.save_freq}. "
                 'Expected save_freq are "epoch" or integer'
             )
 
+        if self.save_freq == "eval" and self._best_model_filepath is None:
+            raise ValueError(
+                "If save_freq is used in eval mode, best_model_filepath "
+                "arg needs to be specified."
+            )
         # Only the chief worker writes model checkpoints, but all workers
         # restore checkpoint at on_train_begin().
         self._chief_worker_only = False
@@ -1459,7 +1540,7 @@ class ModelCheckpoint(Callback):
 
     def _implements_train_batch_hooks(self):
         # Only call batch hooks when saving on batch
-        return self.save_freq != "epoch"
+        return isinstance(self.save_freq, int)
 
     def on_train_batch_end(self, batch, logs=None):
         if self._should_save_on_batch(batch):
@@ -1471,12 +1552,44 @@ class ModelCheckpoint(Callback):
     def on_epoch_end(self, epoch, logs=None):
         self.epochs_since_last_save += 1
 
-        if self.save_freq == "epoch":
+        if self.save_freq in ["epoch", "eval"]:
             self._save_model(epoch=epoch, batch=None, logs=logs)
+
+    def on_test_begin(self, logs=None):
+        """Updates export_index to the latest checkpoint."""
+        if self.save_freq != "eval":
+            super().on_test_begin(logs)
+        else:
+            most_recent_filepath = (
+                self._get_most_recently_modified_file_matching_pattern(
+                    self.filepath
+                )
+            )
+            if most_recent_filepath is not None:
+                self.export_index = (
+                    int(
+                        re.match(r".*ckpt-(?P<ckpt>\d+)", most_recent_filepath)[
+                            "ckpt"
+                        ]
+                    )
+                    - 1
+                )
+            else:
+                self.export_index = 0
+
+    def on_test_end(self, logs):
+        """Saves best model at the end of an evaluation epoch."""
+        if self.save_freq != "eval":
+            super().on_test_end(logs)
+        else:
+            self.epochs_since_last_save += 1
+            self._save_model(
+                epoch=self.export_index, batch=None, logs=logs, eval=True
+            )
 
     def _should_save_on_batch(self, batch):
         """Handles batch-level saving logic, supports steps_per_execution."""
-        if self.save_freq == "epoch":
+        if not isinstance(self.save_freq, int):
             return False
 
         if batch <= self._last_batch_seen:  # New epoch.
@@ -1491,7 +1604,7 @@ class ModelCheckpoint(Callback):
             return True
         return False
 
-    def _save_model(self, epoch, batch, logs):
+    def _save_model(self, epoch, batch, logs, eval=False):
         """Saves the model.
 
         Args:
@@ -1509,7 +1622,14 @@ class ModelCheckpoint(Callback):
             # Block only when saving interval is reached.
             logs = tf_utils.sync_to_numpy_or_python_type(logs)
             self.epochs_since_last_save = 0
-            filepath = self._get_file_path(epoch, batch, logs)
+            if eval:
+                filepath = self._get_file_path(
+                    epoch, batch, logs, self._best_model_filepath
+                )
+            else:
+                filepath = self._get_file_path(
+                    epoch, batch, logs, self.filepath
+                )
 
             # Create host directory if it doesn't exist.
             dirname = os.path.dirname(filepath)
@@ -1587,7 +1707,7 @@ class ModelCheckpoint(Callback):
                 # Re-throw the error for any other causes.
                 raise e
 
-    def _get_file_path(self, epoch, batch, logs):
+    def _get_file_path(self, epoch, batch, logs, file_path):
         """Returns the file path for checkpoint."""
 
         try:
@@ -1596,14 +1716,14 @@ class ModelCheckpoint(Callback):
             # logged metrics and the path's placeholders can cause formatting to
             # fail.
             if batch is None or "batch" in logs:
-                file_path = self.filepath.format(epoch=epoch + 1, **logs)
+                file_path = file_path.format(epoch=epoch + 1, **logs)
             else:
-                file_path = self.filepath.format(
+                file_path = file_path.format(
                     epoch=epoch + 1, batch=batch + 1, **logs
                 )
         except KeyError as e:
             raise KeyError(
-                f'Failed to format this callback filepath: "{self.filepath}". '
+                f'Failed to format this callback filepath: "{file_path}". '
                 f"Reason: {e}"
             )
         self._write_filepath = distributed_file_utils.write_filepath(
